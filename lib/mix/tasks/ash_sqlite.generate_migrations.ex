@@ -25,6 +25,8 @@ defmodule Mix.Tasks.AshSqlite.GenerateMigrations do
   * `dry-run` - no files are created, instead the new migration is printed
   * `check` - no files are created, returns an exit(1) code if the current snapshots and resources don't fit
   * `dev` - dev files are created (see Development Workflow section below)
+  * `snapshots-only` - only the snapshots are written, no migration: for tables that already exist, such as the
+    tables of an Ecto schema moved to a resource, so that the next migration starts from them
 
   #### Snapshots
 
@@ -117,7 +119,8 @@ defmodule Mix.Tasks.AshSqlite.GenerateMigrations do
           check: :boolean,
           dev: :boolean,
           auto_name: :boolean,
-          drop_columns: :boolean
+          drop_columns: :boolean,
+          snapshots_only: :boolean
         ]
       )
 

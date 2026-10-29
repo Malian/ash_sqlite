@@ -837,8 +837,9 @@ defmodule AshSqlite.MigrationGeneratorTest do
                |> Enum.at(1)
                |> File.read!()
 
-      assert file =~
-               ~S[references(:posts, column: :id, name: "special_post_fkey", type: :uuid, on_delete: :delete_all, on_update: :update_all)]
+      # SQLite cannot alter the column the new reference is on: the migration says so instead of a `modify`.
+      assert file =~ ~S[raise "SQLite does not support altering a column. "]
+      assert file =~ ~S[recreate the `posts` table with the new definition of `post_id`]
 
       assert file =~ ~S[raise "SQLite does not support dropping foreign key constraints.]
       assert file =~ ~S[posts_post_id_fkey]
@@ -847,7 +848,7 @@ defmodule AshSqlite.MigrationGeneratorTest do
 
       assert down_code =~ ~S[raise "SQLite does not support dropping foreign key constraints.]
       assert down_code =~ ~S[special_post_fkey]
-      assert down_code =~ ~S[references(:posts]
+      assert down_code =~ ~S[recreate the `posts` table with the new definition of `post_id`]
     end
 
     test "dropping foreign keys raises with guidance since SQLite doesn't support it", %{
@@ -1520,10 +1521,12 @@ defmodule AshSqlite.MigrationGeneratorTest do
 
       assert before_index_drop =~ ~S[comments_post_id_fkey]
 
-      assert after_index_drop =~ ~S[modify :id, :uuid, null: true, primary_key: false]
+      # SQLite cannot alter a column: no `modify`, which `Ecto.Adapters.SQLite3` refuses, but what to do.
+      refute after_index_drop =~ "modify "
+      assert after_index_drop =~ ~S[recreate the `posts` table with the new definition of `id`]
 
       assert after_index_drop =~
-               ~S[modify :post_id, references(:posts, column: :id, name: "comments_post_id_fkey", type: :uuid)]
+               ~S[recreate the `comments` table with the new definition of `post_id`]
     end
   end
 
@@ -1594,6 +1597,180 @@ defmodule AshSqlite.MigrationGeneratorTest do
       # Down migration
       assert File.read!(file2) =~ ~S[rename table(:posts), :creator2_id, to: :creator_id]
       assert File.read!(file2) =~ ~S[rename table(:posts), :contributer2_id, to: :contributer_id]
+    end
+  end
+
+  describe "--snapshots-only" do
+    test "writes the snapshots of existing tables and no migration, so the next one starts from them",
+         %{
+           snapshot_path: snapshot_path,
+           migration_path: migration_path
+         } do
+      defposts do
+        attributes do
+          uuid_primary_key(:id)
+          attribute(:title, :string, public?: true)
+        end
+      end
+
+      defdomain([Post])
+
+      # No name and no `auto_name`: a run that writes no migration needs none.
+      AshSqlite.MigrationGenerator.generate(Domain,
+        snapshot_path: snapshot_path,
+        migration_path: migration_path,
+        quiet: true,
+        format: false,
+        snapshots_only: true
+      )
+
+      assert [_snapshot] = Path.wildcard("#{snapshot_path}/test_repo/posts/*.json")
+      assert [] = Path.wildcard("#{migration_path}/**/*.exs")
+
+      defposts do
+        attributes do
+          uuid_primary_key(:id)
+          attribute(:title, :string, public?: true)
+          attribute(:body, :string, public?: true)
+        end
+      end
+
+      defdomain([Post])
+
+      AshSqlite.MigrationGenerator.generate(Domain,
+        snapshot_path: snapshot_path,
+        migration_path: migration_path,
+        quiet: true,
+        format: false,
+        auto_name: true
+      )
+
+      assert [file] = Path.wildcard("#{migration_path}/**/*_migrate_resources*.exs")
+      contents = File.read!(file)
+
+      assert contents =~ "alter table(:posts) do"
+      assert contents =~ "add :body, :text"
+      refute contents =~ "create table"
+    end
+  end
+
+  describe "identities with a where" do
+    test "the unique index keeps the identity's condition", %{
+      snapshot_path: snapshot_path,
+      migration_path: migration_path
+    } do
+      defposts do
+        sqlite do
+          identity_wheres_to_sql(one_draft: "status = 'draft'")
+        end
+
+        identities do
+          identity :one_draft, [:status] do
+            where(expr(status == "draft"))
+          end
+        end
+
+        attributes do
+          uuid_primary_key(:id)
+          attribute(:status, :string, public?: true)
+        end
+      end
+
+      defdomain([Post])
+
+      AshSqlite.MigrationGenerator.generate(Domain,
+        snapshot_path: snapshot_path,
+        migration_path: migration_path,
+        quiet: true,
+        format: false,
+        auto_name: true
+      )
+
+      assert [file] = Path.wildcard("#{migration_path}/**/*_migrate_resources*.exs")
+
+      assert File.read!(file) =~
+               ~S{create unique_index(:posts, [:status], where: "status = 'draft'", name: "posts_one_draft_index")}
+    end
+
+    test "an identity with a where and no SQL for it is refused, rather than made unique for every row",
+         %{
+           snapshot_path: snapshot_path,
+           migration_path: migration_path
+         } do
+      defposts do
+        identities do
+          identity :one_draft, [:status] do
+            where(expr(status == "draft"))
+          end
+        end
+
+        attributes do
+          uuid_primary_key(:id)
+          attribute(:status, :string, public?: true)
+        end
+      end
+
+      defdomain([Post])
+
+      assert_raise RuntimeError, ~r/identity_wheres_to_sql/, fn ->
+        AshSqlite.MigrationGenerator.generate(Domain,
+          snapshot_path: snapshot_path,
+          migration_path: migration_path,
+          quiet: true,
+          format: false,
+          auto_name: true
+        )
+      end
+    end
+  end
+
+  describe "altering a column" do
+    test "says to rebuild the table instead of writing a modify SQLite cannot run", %{
+      snapshot_path: snapshot_path,
+      migration_path: migration_path
+    } do
+      defposts do
+        attributes do
+          uuid_primary_key(:id)
+          attribute(:title, :string, public?: true)
+        end
+      end
+
+      defdomain([Post])
+
+      AshSqlite.MigrationGenerator.generate(Domain,
+        snapshot_path: snapshot_path,
+        migration_path: migration_path,
+        quiet: true,
+        format: false,
+        auto_name: true
+      )
+
+      defposts do
+        attributes do
+          uuid_primary_key(:id)
+          attribute(:title, :string, public?: true, allow_nil?: false)
+        end
+      end
+
+      defdomain([Post])
+
+      AshSqlite.MigrationGenerator.generate(Domain,
+        snapshot_path: snapshot_path,
+        migration_path: migration_path,
+        quiet: true,
+        format: false,
+        auto_name: true
+      )
+
+      assert [_first, second] =
+               "#{migration_path}/**/*_migrate_resources*.exs" |> Path.wildcard() |> Enum.sort()
+
+      contents = File.read!(second)
+
+      refute contents =~ "modify "
+      assert contents =~ ~S[raise "SQLite does not support altering a column. "]
+      assert contents =~ ~S[recreate the `posts` table with the new definition of `title`]
     end
   end
 end

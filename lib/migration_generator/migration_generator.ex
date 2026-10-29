@@ -19,7 +19,8 @@ defmodule AshSqlite.MigrationGenerator do
             check: false,
             dev: false,
             auto_name: false,
-            drop_columns: false
+            drop_columns: false,
+            snapshots_only: false
 
   def generate(domains, opts \\ []) do
     domains = List.wrap(domains)
@@ -310,10 +311,14 @@ defmodule AshSqlite.MigrationGenerator do
 
         contents = format(contents, opts)
 
-        [
-          {snapshot_file, snapshot_contents},
-          {migration_file, contents}
-        ]
+        if opts.snapshots_only do
+          [{snapshot_file, snapshot_contents}]
+        else
+          [
+            {snapshot_file, snapshot_contents},
+            {migration_file, contents}
+          ]
+        end
       end
     end
     |> List.flatten()
@@ -342,7 +347,7 @@ defmodule AshSqlite.MigrationGenerator do
         operations ->
           dev_migrations = get_dev_migrations(opts, repo)
 
-          if !opts.dev and dev_migrations != [] do
+          if !opts.dev and !opts.snapshots_only and dev_migrations != [] do
             if opts.check do
               Mix.shell().error("""
               Codegen check failed.
@@ -359,15 +364,22 @@ defmodule AshSqlite.MigrationGenerator do
             end
           end
 
+          # With `snapshots_only`, the tables are taken as they are: only their snapshots are written, so that the next
+          # migration starts from them.
           migration_files =
-            operations
-            |> organize_operations
-            |> build_up_and_down()
-            |> migration(repo, opts)
+            if opts.snapshots_only do
+              []
+            else
+              operations
+              |> organize_operations
+              |> build_up_and_down()
+              |> migration(repo, opts)
+              |> List.wrap()
+            end
 
           snapshot_files = create_new_snapshot(snapshots, repo_name(repo), opts)
 
-          [migration_files] ++ snapshot_files
+          migration_files ++ snapshot_files
       end
     end)
   end
@@ -932,9 +944,11 @@ defmodule AshSqlite.MigrationGenerator do
   end
 
   defp require_name!(opts) do
-    if !opts.name && !opts.dry_run && !opts.check && !opts.dev && !opts.auto_name do
+    if !opts.name && !opts.dry_run && !opts.check && !opts.dev && !opts.auto_name &&
+         !opts.snapshots_only do
       raise """
-      Name must be provided when generating migrations, unless `--dry-run` or `--check` or `--dev` is also provided.
+      Name must be provided when generating migrations, unless `--dry-run`, `--check`, `--dev` or `--snapshots-only`
+      is also provided.
 
       Please provide a name. for example:
 
@@ -1637,6 +1651,7 @@ defmodule AshSqlite.MigrationGenerator do
             identity.name == old_identity.name &&
               Enum.sort(old_identity.keys) == Enum.sort(identity.keys) &&
               old_identity.base_filter == identity.base_filter &&
+              Map.get(old_identity, :where) == Map.get(identity, :where) &&
               Map.get(old_identity, :nils_distinct?, true) ==
                 Map.get(identity, :nils_distinct?, true)
           end)
@@ -1681,6 +1696,7 @@ defmodule AshSqlite.MigrationGenerator do
             old_identity.name == identity.name &&
               Enum.sort(old_identity.keys) == Enum.sort(identity.keys) &&
               old_identity.base_filter == identity.base_filter &&
+              Map.get(old_identity, :where) == Map.get(identity, :where) &&
               Map.get(old_identity, :nils_distinct?, true) ==
                 Map.get(identity, :nils_distinct?, true)
           end)
@@ -1775,6 +1791,9 @@ defmodule AshSqlite.MigrationGenerator do
       end
     end
   end
+
+  # SQLite has no ALTER COLUMN, and `Ecto.Adapters.SQLite3` refuses `modify`; libSQL runs it.
+  defp alter_column?(repo), do: repo.__adapter__() != Ecto.Adapters.SQLite3
 
   defp attribute_operations(snapshot, old_snapshot, opts) do
     attributes_to_add =
@@ -1882,7 +1901,8 @@ defmodule AshSqlite.MigrationGenerator do
               %Operation.AlterAttribute{
                 new_attribute: new_attribute,
                 old_attribute: old_attribute,
-                table: snapshot.table
+                table: snapshot.table,
+                alter_column?: alter_column?(snapshot.repo)
               }
             ] ++ redo_deferrability
 
@@ -1906,7 +1926,8 @@ defmodule AshSqlite.MigrationGenerator do
             %Operation.AlterAttribute{
               new_attribute: Map.delete(new_attribute, :references),
               old_attribute: Map.delete(old_attribute, :references),
-              table: snapshot.table
+              table: snapshot.table,
+              alter_column?: alter_column?(snapshot.repo)
             }
           ]
         end
@@ -2588,15 +2609,16 @@ defmodule AshSqlite.MigrationGenerator do
       end)
     end)
     |> Enum.sort_by(& &1.name)
-    |> Enum.map(&Map.take(&1, [:name, :keys, :nils_distinct?]))
     |> Enum.map(fn %{keys: keys} = identity ->
       %{
-        identity
-        | keys:
-            Enum.map(keys, fn key ->
-              attribute = Ash.Resource.Info.attribute(resource, key)
-              attribute.source || attribute.name
-            end)
+        name: identity.name,
+        nils_distinct?: identity.nils_distinct?,
+        keys:
+          Enum.map(keys, fn key ->
+            attribute = Ash.Resource.Info.attribute(resource, key)
+            attribute.source || attribute.name
+          end),
+        where: identity_where(resource, identity)
       }
     end)
     |> Enum.map(fn identity ->
@@ -2609,6 +2631,18 @@ defmodule AshSqlite.MigrationGenerator do
     end)
     |> Enum.map(&Map.put_new(&1, :nils_distinct?, true))
     |> Enum.map(&Map.put(&1, :base_filter, AshSqlite.DataLayer.Info.base_filter_sql(resource)))
+  end
+
+  # An identity with a `where` is a partial unique index: without its condition the index would hold every row to it.
+  defp identity_where(_resource, %{where: nil}), do: nil
+
+  defp identity_where(resource, identity) do
+    AshSqlite.DataLayer.Info.identity_where_to_sql(resource, identity.name) ||
+      raise """
+      Must provide an entry for :#{identity.name} in `sqlite.identity_wheres_to_sql`, or skip this identity with `sqlite.skip_unique_indexes`.
+
+      See https://hexdocs.pm/ash_sqlite/AshSqlite.DataLayer.Info.html#identity_wheres_to_sql/1 for an example.
+      """
   end
 
   defp default(%{name: name, default: default}, resource, _repo) when is_function(default) do
@@ -2884,6 +2918,7 @@ defmodule AshSqlite.MigrationGenerator do
     end)
     |> add_index_name(table)
     |> Map.put_new(:base_filter, nil)
+    |> Map.put_new(:where, nil)
   end
 
   defp add_index_name(%{name: name} = index, table) do

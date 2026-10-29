@@ -256,6 +256,13 @@ defmodule AshSqlite.DataLayer do
         A keyword list of identity names to the unique index name that they should use when being managed by the migration generator.
         """
       ],
+      identity_wheres_to_sql: [
+        type: :keyword_list,
+        default: [],
+        doc: """
+        A keyword list of identity names and the SQL representation of their `where` clause. See `AshSqlite.DataLayer.Info.identity_wheres_to_sql/1` for more details.
+        """
+      ],
       foreign_key_names: [
         type: {:list, {:or, [{:tuple, [:atom, :string]}, {:tuple, [:string, :string]}]}},
         default: [],

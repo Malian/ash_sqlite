@@ -7,6 +7,15 @@ defmodule AshSqlite.MigrationGenerator.Operation do
 
   defmodule Helper do
     @moduledoc false
+
+    # The condition of a unique index: the resource's base filter and the identity's own `where`, either or both.
+    def unique_index_where(identity) do
+      case Enum.reject([Map.get(identity, :base_filter), Map.get(identity, :where)], &is_nil/1) do
+        [] -> nil
+        conditions -> Enum.join(conditions, " AND ")
+      end
+    end
+
     def join(list),
       do:
         list
@@ -245,7 +254,8 @@ defmodule AshSqlite.MigrationGenerator.Operation do
       :new_attribute,
       :table,
       :multitenancy,
-      :old_multitenancy
+      :old_multitenancy,
+      alter_column?: true
     ]
 
     import Helper
@@ -278,6 +288,14 @@ defmodule AshSqlite.MigrationGenerator.Operation do
         end
 
       "#{null}#{default}#{primary_key}"
+    end
+
+    # SQLite cannot change a column in place: the migration stops with what to do, as for its foreign keys, rather
+    # than write a `modify` that `Ecto.Adapters.SQLite3` refuses only once the migration runs.
+    def up(%{alter_column?: false, table: table, new_attribute: attribute}) do
+      ~s[raise "SQLite does not support altering a column. " <>
+          "You will need to manually recreate the `#{table}` table with the new definition of `#{attribute.source}`. " <>
+          "See https://www.sqlite.org/lang_altertable.html#otheralter for guidance."]
     end
 
     def up(%{
@@ -491,12 +509,12 @@ defmodule AshSqlite.MigrationGenerator.Operation do
     import Helper
 
     def up(%{
-          identity:
-            %{name: name, keys: keys, base_filter: base_filter, index_name: index_name} = identity,
+          identity: %{name: name, keys: keys, index_name: index_name} = identity,
           table: table,
           multitenancy: multitenancy
         }) do
       nils_distinct? = Map.get(identity, :nils_distinct?, true)
+      base_filter = unique_index_where(identity)
 
       keys =
         case multitenancy.strategy do
@@ -798,10 +816,12 @@ defmodule AshSqlite.MigrationGenerator.Operation do
     end
 
     def down(%{
-          identity: %{name: name, keys: keys, base_filter: base_filter, index_name: index_name},
+          identity: %{name: name, keys: keys, index_name: index_name} = identity,
           table: table,
           multitenancy: multitenancy
         }) do
+      base_filter = unique_index_where(identity)
+
       keys =
         case multitenancy.strategy do
           :attribute ->

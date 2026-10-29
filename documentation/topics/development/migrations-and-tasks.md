@@ -66,6 +66,27 @@ fi
 
 After saving this file to something like `regen.sh`, make it executable with `chmod +x regen.sh`. Now you can run it with `./regen.sh name_of_operation`. If you would like the migrations to automatically run after regeneration, add the `-m` flag: `./regen.sh name_of_operation -m`.
 
+### Adopting Existing Tables
+
+When the tables already exist (an app moving its Ecto schemas to resources), write their snapshots without a
+migration, so that the next generated migration starts from the tables as they are:
+
+```bash
+mix ash_sqlite.generate_migrations --snapshots-only
+```
+
+Check that the resources describe the tables faithfully first, with `--dry-run` on an empty snapshot folder.
+
+### Changes SQLite Cannot Make
+
+SQLite has no `ALTER COLUMN`. A changed type, default, nullability or reference on an existing column generates a
+migration that raises with guidance instead of a `modify`: replace it with a migration that rebuilds the table (create
+the new table, copy the rows, drop the old one, rename the new one). See
+[the SQLite documentation](https://www.sqlite.org/lang_altertable.html#otheralter).
+
+An identity with a `where` is a partial unique index: give its SQL with `identity_wheres_to_sql` in the `sqlite` block,
+or the generator refuses it rather than make the index hold every row.
+
 ## Multiple Repos
 
 If you are using multiple repos, you will likely need to use `mix ecto.migrate` and manage it separately for each repo, as the options would
