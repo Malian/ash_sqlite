@@ -203,6 +203,23 @@ defmodule AshSqlite.FilterTest do
       assert [] = Ash.read!(query)
     end
 
+    test "equality on a column of its own type leaves the column bare, so SQLite seeks its index" do
+      post = Post |> Ash.Changeset.for_create(:create, %{title: "title"}) |> Ash.create!()
+      post_id = post.id
+      query = Post |> Ash.Query.new() |> Ash.Query.filter(id == ^post_id)
+
+      {:ok, ecto_query} = Ash.Query.data_layer_query(query)
+      {sql, params} = Ecto.Adapters.SQL.to_sql(:all, TestRepo, ecto_query)
+      %{rows: plan} = Ecto.Adapters.SQL.query!(TestRepo, "EXPLAIN QUERY PLAN " <> sql, params)
+
+      refute sql =~ ~S|CAST(p0."id"|
+
+      assert Enum.all?(plan, fn row -> List.last(row) =~ ~r/^SEARCH p0 USING .*INDEX/ end),
+             inspect(plan)
+
+      assert [%Post{id: ^post_id}] = Ash.read!(query)
+    end
+
     test "empty pinned lists return no rows" do
       assert [] =
                Post

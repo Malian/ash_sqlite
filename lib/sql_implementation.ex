@@ -948,6 +948,28 @@ defmodule AshSqlite.SqlImplementation do
 
   defp parameterized_ci_string_type?(_, _), do: false
 
+  # A column already holds its own type, so casting it to that type changes no value, but SQLite
+  # cannot use an index through an expression: `CAST(p0."id" AS TEXT) = ?` scans the whole table
+  # where `p0."id" = ?` seeks the index. A column stored as one of Ecto's own types, which SQLite
+  # holds as they are, is therefore left bare. Any other keeps its type: a case-insensitive string,
+  # whose `COLLATE NOCASE` is what makes it compare and sort without case, and a storage name SQLite
+  # does not know (an enum stored as `:status`), which it casts to a number: the value it is compared
+  # with is cast the same way, so the column must be.
+  @impl true
+  def ref_cast_type(type) do
+    storage = ref_storage_type(type)
+    if storage == :uuid or Ecto.Type.primitive?(storage), do: nil, else: type
+  end
+
+  defp ref_storage_type({:parameterized, _} = type), do: Ecto.Type.type(type)
+  defp ref_storage_type({:parameterized, mod, params}), do: mod.type(params)
+
+  defp ref_storage_type(type) when is_atom(type) do
+    if Ash.Type.ash_type?(type), do: Ash.Type.storage_type(type, []), else: type
+  end
+
+  defp ref_storage_type(type), do: type
+
   @impl true
   def type_expr(expr, nil), do: expr
 
